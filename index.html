@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>引力画廊 · Gravity Gallery</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #050510;
+    overflow: hidden;
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    user-select: none;
+  }
+  canvas { display: block; }
+
+  #ui {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 14px 20px;
+    background: linear-gradient(180deg, rgba(5,5,16,0.85) 0%, transparent 100%);
+    z-index: 10;
+    pointer-events: none;
+  }
+
+  #title {
+    color: rgba(180,160,255,0.9);
+    font-size: 16px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
+  }
+
+  #stats {
+    color: rgba(140,180,255,0.7);
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  #controls {
+    display: flex;
+    gap: 8px;
+    pointer-events: all;
+  }
+
+  button {
+    background: rgba(100,80,200,0.18);
+    border: 1px solid rgba(140,120,255,0.3);
+    color: rgba(200,180,255,0.9);
+    padding: 7px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: all 0.18s ease;
+    backdrop-filter: blur(8px);
+  }
+  button:hover {
+    background: rgba(120,100,240,0.32);
+    border-color: rgba(160,140,255,0.55);
+    color: #fff;
+  }
+  button:active { transform: scale(0.96); }
+
+  #hints {
+    position: fixed;
+    bottom: 18px;
+    left: 50%;
+    transform: translateX(-50%);
+    color: rgba(140,160,220,0.5);
+    font-size: 12px;
+    text-align: center;
+    pointer-events: none;
+    letter-spacing: 0.04em;
+    line-height: 1.7;
+  }
+
+  #trail-toggle {
+    position: fixed;
+    bottom: 18px;
+    right: 18px;
+    pointer-events: all;
+  }
+  #trail-toggle.active {
+    background: rgba(80,140,255,0.3);
+    border-color: rgba(120,180,255,0.6);
+    color: #cce0ff;
+  }
+</style>
+</head>
+<body>
+
+<canvas id="c"></canvas>
+
+<div id="ui">
+  <div id="title">🌌 引力画廊</div>
+  <div id="stats">🪐 0 星球 &nbsp;|&nbsp; ☄ 0 流星</div>
+  <div id="controls">
+    <button id="btn-clear">清除全部</button>
+    <button id="btn-demo">生成演示</button>
+  </div>
+</div>
+
+<div id="hints">
+  点击画布 → 放置星球 &nbsp;|&nbsp; 按住拖拽 → 发射流星
+</div>
+
+<button id="trail-toggle" class="active">彗尾轨迹</button>
+
+<script>
+// ============================================================
+//  引力画廊 · Gravity Gallery
+//  代码小龙虾 🦞 出品
+// ============================================================
+
+const canvas = document.getElementById('c');
+const ctx    = canvas.getContext('2d');
+const stats  = document.getElementById('stats');
+const trailBtn = document.getElementById('trail-toggle');
+
+let W = 0, H = 0;
+
+// 物理常量
+const G         = 500;
+const MAX_DT    = 1 / 30;
+const SOFTENING = 3;
+const MIN_DIST  = 8;
+
+// ============================================================
+//  星云调色盘
+// ============================================================
+const NEBULA_COLORS = [
+  '#a78bfa','#818cf8','#6366f1','#8b5cf6','#7c3aed',
+  '#c084fc','#e879f9','#f0abfc','#f472b6','#fb7185',
+  '#fb923c','#fbbf24','#facc15','#a3e635','#4ade80',
+  '#34d399','#2dd4bf','#22d3ee','#38bdf8','#60a5fa',
+  '#93c5fd','#67e8f9','#c4b5fd','#fcd34d','#86efac',
+];
+
+function randomColor() {
+  return NEBULA_COLORS[Math.floor(Math.random() * NEBULA_COLORS.length)];
+}
+
+// ============================================================
+//  实体
+// ============================================================
+class Body {
+  constructor(x, y, mass, radius, color, isMeteor) {
+    this.x  = x;
+    this.y  = y;
+    this.vx = 0;
+    this.vy = 0;
+    this.mass    = mass;
+    this.radius  = radius;
+    this.color   = color;
+    this.isMeteor = isMeteor;
+    this.alive   = true;
+    this.trail   = [];
+    this.maxTrail = isMeteor ? 40 : 0;
+  }
+
+  get speed() { return Math.hypot(this.vx, this.vy); }
+
+  update(dt) {
+    this.x += this.vx * dt;
+    this.y += this.vy * dt;
+
+    if (this.maxTrail > 0) {
+      this.trail.push({ x: this.x, y: this.y });
+      if (this.trail.length > this.maxTrail) this.trail.shift();
+    }
+
+    if (this.isMeteor) {
+      const pad = 300;
+      if (this.x < -pad || this.x > W+pad || this.y < -pad || this.y > H+pad) {
+        this.alive = false;
+      }
+    }
+  }
+
+  draw() {
+    if (this.trail.length > 1) {
+      for (let i = 1; i < this.trail.length; i++) {
+        const alpha = (i / this.trail.length) * 0.45;
+        ctx.beginPath();
+        ctx.strokeStyle = this.color + Math.floor(alpha * 255).toString(16).padStart(2,'0');
+        ctx.lineWidth   = (i / this.trail.length) * this.radius * 0.7;
+        ctx.moveTo(this.trail[i-1].x, this.trail[i-1].y);
+        ctx.lineTo(this.trail[i].x,   this.trail[i].y);
+        ctx.stroke();
+      }
+    }
+
+    const glow = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.radius * 2.2);
+    glow.addColorStop(0,   this.color + 'cc');
+    glow.addColorStop(0.5, this.color + '44');
+    glow.addColorStop(1,   this.color + '00');
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius * 2.2, 0, Math.PI * 2);
+    ctx.fillStyle = glow;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+    ctx.fillStyle = this.color;
+    ctx.fill();
+
+    ctx.beginPath();
+    ctx.arc(this.x - this.radius * 0.3, this.y - this.radius * 0.3, this.radius * 0.4, 0, Math.PI * 2);
+    ctx.fillStyle = 'rgba(255,255,255,0.25)';
+    ctx.fill();
+  }
+}
+
+// ============================================================
+let bodies = [];
+let showTrails = true;
+
+// ============================================================
+//  物理
+// ============================================================
+function computeGravities(bodies, dt) {
+  for (let i = 0; i < bodies.length; i++) {
+    const a = bodies[i];
+    if (!a.alive) continue;
+
+    let ax = 0, ay = 0;
+
+    for (let j = 0; j < bodies.length; j++) {
+      if (i === j) continue;
+      const b = bodies[j];
+      if (!b.alive) continue;
+
+      const dx   = b.x - a.x;
+      const dy   = b.y - a.y;
+      const dist2 = dx*dx + dy*dy;
+      const dist  = Math.sqrt(dist2) + SOFTENING;
+
+      if (dist < MIN_DIST) continue;
+
+      const F = (G * a.mass * b.mass) / (dist2 + SOFTENING * SOFTENING);
+      ax += F * dx / dist / a.mass;
+      ay += F * dy / dist / a.mass;
+    }
+
+    a.vx += ax * dt;
+    a.vy += ay * dt;
+  }
+}
+
+function integrate(bodies, dt) {
+  for (const b of bodies) {
+    if (!b.alive) continue;
+    b.update(dt);
+
+    if (!b.isMeteor) {
+      for (const other of bodies) {
+        if (other === b || !other.alive || other.isMeteor) continue;
+        const dx = other.x - b.x;
+        const dy = other.y - b.y;
+        const d  = Math.hypot(dx, dy);
+        if (d < b.radius + other.radius) {
+          const keep   = b.mass >= other.mass ? b : other;
+          const absorb = b.mass >= other.mass ? other : b;
+          keep.mass   += absorb.mass * 0.8;
+          keep.radius  = Math.cbrt((4/3)*Math.PI*(keep.mass/Math.PI));
+          keep.radius  = Math.max(keep.radius, 6);
+          absorb.alive = false;
+        }
+      }
+    }
+  }
+}
+
+function removeDead(bodies) {
+  for (let i = bodies.length - 1; i >= 0; i--) {
+    if (!bodies[i].alive) bodies.splice(i, 1);
+  }
+}
+
+// ============================================================
+//  背景星空
+// ============================================================
+let stars = [];
+function genStars() {
+  stars = [];
+  for (let i = 0; i < 220; i++) {
+    stars.push({
+      x: Math.random() * W,
+      y: Math.random() * H,
+      r: Math.random() * 1.2 + 0.3,
+      a: Math.random() * 0.6 + 0.2,
+      twinkle: Math.random() * Math.PI * 2,
+    });
+  }
+}
+
+function drawBackground(t) {
+  const bg = ctx.createRadialGradient(W/2, H/2, 0, W/2, H/2, Math.max(W, H) * 0.75);
+  bg.addColorStop(0,   '#0d0b20');
+  bg.addColorStop(0.6, '#080614');
+  bg.addColorStop(1,   '#030309');
+  ctx.fillStyle = bg;
+  ctx.fillRect(0, 0, W, H);
+
+  for (const s of stars) {
+    const flicker = Math.sin(t * 1.5 + s.twinkle) * 0.2 + 0.8;
+    ctx.beginPath();
+    ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+    ctx.fillStyle = `rgba(200,210,255,${s.a * flicker})`;
+    ctx.fill();
+  }
+
+  for (let i = 0; i < 3; i++) {
+    const nx = W * (0.2 + i * 0.3 + Math.sin(t * 0.1 + i) * 0.05);
+    const ny = H * (0.4 + Math.cos(t * 0.07 + i * 1.3) * 0.08);
+    const nr = 180 + Math.sin(t * 0.2 + i) * 40;
+    const nebula = ctx.createRadialGradient(nx, ny, 0, nx, ny, nr);
+    nebula.addColorStop(0,   `rgba(80,50,160,0.04)`);
+    nebula.addColorStop(0.5, `rgba(60,30,120,0.02)`);
+    nebula.addColorStop(1,   'transparent');
+    ctx.fillStyle = nebula;
+    ctx.fillRect(0, 0, W, H);
+  }
+}
+
+// ============================================================
+//  拖拽引导线
+// ============================================================
+function drawShootLine(start, end) {
+  const dx = start.x - end.x;
+  const dy = start.y - end.y;
+  const len = Math.hypot(dx, dy);
+  if (len < 4) return;
+
+  const angle = Math.atan2(dy, dx);
+  const arrowLen = Math.min(len, 120);
+
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+  ctx.lineWidth   = 1.5;
+  ctx.setLineDash([5, 4]);
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  ctx.lineTo(start.x + Math.cos(angle) * arrowLen, start.y + Math.sin(angle) * arrowLen);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  ctx.beginPath();
+  ctx.arc(start.x + Math.cos(angle) * arrowLen, start.y + Math.sin(angle) * arrowLen, 5, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(255,220,100,0.8)';
+  ctx.fill();
+
+  const speed = (len * 0.08).toFixed(0);
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '11px system-ui';
+  ctx.fillText(`v=${speed}`, start.x + 8, start.y - 8);
+
+  ctx.restore();
+}
+
+// ============================================================
+//  主循环
+// ============================================================
+let lastTime  = 0;
+let globalTime = 0;
+
+function loop(ts) {
+  const dt = Math.min((ts - lastTime) / 1000, MAX_DT);
+  lastTime  = ts;
+  globalTime += dt;
+
+  drawBackground(globalTime);
+
+  computeGravities(bodies, dt);
+  integrate(bodies, dt);
+  removeDead(bodies);
+
+  for (const b of bodies) b.draw();
+
+  if (isDragging && dragStart && dragCurrent) {
+    drawShootLine(dragStart, dragCurrent);
+  }
+
+  stats.textContent = `🪐 ${bodies.filter(b=>!b.isMeteor).length} 星球 &nbsp;|&nbsp; ☄ ${bodies.filter(b=>b.isMeteor).length} 流星`;
+
+  requestAnimationFrame(loop);
+}
+
+// ============================================================
+//  输入
+// ============================================================
+let isDragging   = false;
+let dragStart     = null;
+let dragCurrent   = null;
+let mouseDownTime = 0;
+
+function canvasPos(e) {
+  const r = canvas.getBoundingClientRect();
+  return {
+    x: (e.clientX - r.left) * (W / r.width),
+    y: (e.clientY - r.top)  * (H / r.height),
+  };
+}
+
+canvas.addEventListener('mousedown', e => {
+  const { x, y } = canvasPos(e);
+  isDragging   = true;
+  dragStart    = { x, y };
+  dragCurrent  = { x, y };
+  mouseDownTime = Date.now();
+});
+
+canvas.addEventListener('mousemove', e => {
+  if (!isDragging) return;
+  dragCurrent = canvasPos(e);
+});
+
+canvas.addEventListener('mouseup', e => {
+  if (!isDragging || !dragStart) { isDragging = false; return; }
+
+  const { x, y }  = canvasPos(e);
+  const elapsed   = Date.now() - mouseDownTime;
+  const dx        = x - dragStart.x;
+  const dy        = y - dragStart.y;
+  const dist      = Math.hypot(dx, dy);
+
+  if (dist < 6) {
+    const mass   = 80 + Math.random() * 140;
+    const radius = Math.cbrt(mass / Math.PI);
+    const color  = randomColor();
+    bodies.push(new Body(x, y, mass, radius, color, false));
+  } else if (elapsed > 80) {
+    const speed = Math.min(dist * 0.08, 25);
+    const angle = Math.atan2(dy, dx);
+    const meteor = new Body(dragStart.x, dragStart.y, 6, 3.5, '#ffe066', true);
+    meteor.vx    = Math.cos(angle) * speed;
+    meteor.vy    = Math.sin(angle) * speed;
+    meteor.maxTrail = 50;
+    bodies.push(meteor);
+  }
+
+  isDragging  = false;
+  dragStart  = null;
+  dragCurrent = null;
+});
+
+canvas.addEventListener('mouseleave', () => {
+  isDragging  = false;
+  dragStart  = null;
+  dragCurrent = null;
+});
+
+// 触摸支持
+canvas.addEventListener('touchstart', e => {
+  e.preventDefault();
+  const t = e.touches[0];
+  const { x, y } = canvasPos(t);
+  isDragging   = true;
+  dragStart    = { x, y };
+  dragCurrent  = { x, y };
+  mouseDownTime = Date.now();
+}, { passive: false });
+
+canvas.addEventListener('touchmove', e => {
+  e.preventDefault();
+  if (!isDragging) return;
+  dragCurrent = canvasPos(e.touches[0]);
+}, { passive: false });
+
+canvas.addEventListener('touchend', e => {
+  e.preventDefault();
+  if (!isDragging || !dragStart) { isDragging = false; return; }
+  const t = e.changedTouches[0];
+  const { x, y } = canvasPos(t);
+  const elapsed = Date.now() - mouseDownTime;
+  const dx = x - dragStart.x;
+  const dy = y - dragStart.y;
+  const dist = Math.hypot(dx, dy);
+
+  if (dist < 6) {
+    const mass = 80 + Math.random() * 140;
+    const radius = Math.cbrt(mass / Math.PI);
+    bodies.push(new Body(x, y, mass, radius, randomColor(), false));
+  } else if (elapsed > 80) {
+    const speed = Math.min(dist * 0.08, 25);
+    const angle = Math.atan2(dy, dx);
+    const meteor = new Body(dragStart.x, dragStart.y, 6, 3.5, '#ffe066', true);
+    meteor.vx = Math.cos(angle) * speed;
+    meteor.vy = Math.sin(angle) * speed;
+    meteor.maxTrail = 50;
+    bodies.push(meteor);
+  }
+
+  isDragging = false;
+  dragStart = null;
+  dragCurrent = null;
+}, { passive: false });
+
+// ============================================================
+//  UI 按钮
+// ============================================================
+document.getElementById('btn-clear').addEventListener('click', () => {
+  bodies = [];
+});
+
+document.getElementById('btn-demo').addEventListener('click', () => {
+  bodies = [];
+  const cx = W / 2, cy = H / 2;
+  for (let i = 0; i < 5; i++) {
+    const angle = (i / 5) * Math.PI * 2;
+    const r = 120 + Math.random() * 60;
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r;
+    const mass = 100 + Math.random() * 100;
+    const radius = Math.cbrt(mass / Math.PI);
+    const body = new Body(x, y, mass, radius, randomColor(), false);
+    body.vx = -Math.sin(angle) * 0.8;
+    body.vy =  Math.cos(angle) * 0.8;
+    bodies.push(body);
+  }
+});
+
+trailBtn.addEventListener('click', () => {
+  showTrails = !showTrails;
+  trailBtn.classList.toggle('active', showTrails);
+  for (const b of bodies) {
+    b.maxTrail = showTrails ? (b.isMeteor ? 50 : 0) : 0;
+  }
+});
+
+// ============================================================
+//  初始化
+// ============================================================
+function resize() {
+  W = canvas.width  = window.innerWidth;
+  H = canvas.height = window.innerHeight;
+  genStars();
+}
+
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
